@@ -2,8 +2,8 @@ package main
 
 import (
 	"azureclient/client/azure"
-	http_client "azureclient/client/http"
 	"azureclient/config"
+	"azureclient/internal"
 	"azureclient/internal/controller"
 	"azureclient/internal/repository"
 	"azureclient/internal/service"
@@ -11,14 +11,17 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"azureclient/internal/otel"
 
-	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
-	gormotel "gorm.io/plugin/opentelemetry"
+	gormotel "gorm.io/plugin/opentelemetry/tracing"
 )
 
 func main() {
@@ -62,69 +65,43 @@ func main() {
 	memberService := service.NewMemberService(repos)
 	memberController := controller.NewMemberController(memberService)
 
-	// Set up Gorilla Mux router
-	r := mux.NewRouter()
-	memberController.RegisterRoutes(r)
-
-	// Start HTTP server
-	go func() {
-		fmt.Println("HTTP server started on :8080")
-		if err := http.ListenAndServe(":8080", r); err != nil {
-			log.Fatalf("Failed to start HTTP server: %v", err)
-		}
-	}()
-
-	// --- Existing Azure/Client logic below ---
+	// Azure client for email
 	client, err := azure.NewAzureClient(cfg.Azure.StorageAccount, cfg.Azure.EmailEndpoint, cfg.Azure.EmailAccessKey)
 	if err != nil {
 		log.Fatalf("Failed to create AzureClient: %v", err)
 	}
+	emailController := controller.NewEmailController(client.SendEmailClient)
 
-	ctx := context.Background()
-	// Example: Upload a blob
-	err = client.BlobClient.UploadBlob(ctx, "test-container", "test-blob.txt", []byte("Hello from AzureClient!"))
-	if err != nil {
-		fmt.Println("UploadBlob error:", err)
-	} else {
-		fmt.Println("Blob uploaded successfully.")
-	}
+	// Set up HTTP routes using SetupRoutes from internal/route.go
+	mux := http.NewServeMux()
+	internal.SetupRoutes(mux, memberController, emailController)
 
-	// Example: Download a blob
-	data, err := client.BlobClient.DownloadBlob(ctx, "test-container", "test-blob.txt")
-	if err != nil {
-		fmt.Println("DownloadBlob error:", err)
-	} else {
-		fmt.Println("Downloaded blob:", string(data))
+	server := &http.Server{
+		Addr:    ":8080",
+		Handler: mux,
 	}
 
-	// Example: Send an email
-	emailReq := azure.SendEmailRequest{
-		Sender:    "DoNotReply@9cb54951-6182-4a23-8dee-328302efdcf2.azurecomm.net",
-		Recipient: "noonthitisan@gmail.com",
-		Subject:   "Test Subject",
-		PlainText: "Hello from AzureClient Email!",
-		HTML:      "<b>Hello from AzureClient Email!</b>",
-	}
-	err = client.SendEmailClient.SendEmail(ctx, emailReq)
-	if err != nil {
-		fmt.Println("SendEmail error:", err)
-	} else {
-		fmt.Println("Email sent successfully.")
-	}
+	// Graceful shutdown setup
+	shutdownCh := make(chan os.Signal, 1)
+	signal.Notify(shutdownCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// Example: PaymentClient usage
-	paymentClient := http_client.NewPaymentClient(cfg.Client.PaymentBaseURL)
-	if err := paymentClient.DoSomething(ctx); err != nil {
-		fmt.Println("PaymentClient error:", err)
-	} else {
-		fmt.Println("PaymentClient call succeeded.")
-	}
+	go func() {
+		fmt.Println("HTTP server started on :8080")
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Failed to start HTTP server: %v", err)
+		}
+	}()
 
-	// Example: MemberClient usage
-	memberClient := http_client.NewMemberClient(cfg.Client.MemberBaseURL)
-	if err := memberClient.DoSomething(ctx); err != nil {
-		fmt.Println("MemberClient error:", err)
-	} else {
-		fmt.Println("MemberClient call succeeded.")
+	// Wait for shutdown signal
+	sig := <-shutdownCh
+	log.Printf("Received signal %s, shutting down HTTP server...", sig)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		log.Fatalf("HTTP server Shutdown: %v", err)
 	}
+	log.Println("HTTP server gracefully stopped.")
+
+// Example: Send an email (now handled by API endpoint /send-email)
 }
