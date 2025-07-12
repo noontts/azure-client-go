@@ -4,23 +4,77 @@ import (
 	"azureclient/client/azure"
 	http_client "azureclient/client/http"
 	"azureclient/config"
+	"azureclient/internal/controller"
+	"azureclient/internal/repository"
+	"azureclient/internal/service"
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 
+	"azureclient/internal/otel"
+
+	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
+	gormotel "gorm.io/plugin/opentelemetry"
 )
 
 func main() {
 	err := godotenv.Load()
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		log.Fatalf("Error loading .env file: %v", err)
 	}
+
+	// --- OpenTelemetry Initialization ---
+	shutdown, err := otel.InitTracer()
+	if err != nil {
+		log.Fatalf("Failed to initialize OpenTelemetry: %v", err)
+	}
+	defer func() {
+		if err := shutdown(context.Background()); err != nil {
+			log.Printf("Error shutting down tracer provider: %v", err)
+		}
+	}()
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	// GORM MySQL connection
+	dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
+		cfg.DB.User, cfg.DB.Password, cfg.DB.Host, cfg.DB.Name)
+	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	if err != nil {
+		log.Fatalf("Failed to connect to database: %v", err)
+	}
+	// Add OpenTelemetry plugin for GORM
+	if err := db.Use(gormotel.NewPlugin()); err != nil {
+		log.Fatalf("Failed to register GORM OpenTelemetry plugin: %v", err)
+	}
+
+	// DI: Repositories struct, Service, Controller
+	repos := repository.Repositories{
+		Member: repository.NewMemberRepository(db),
+		// Add more repositories here as needed
+	}
+	memberService := service.NewMemberService(repos)
+	memberController := controller.NewMemberController(memberService)
+
+	// Set up Gorilla Mux router
+	r := mux.NewRouter()
+	memberController.RegisterRoutes(r)
+
+	// Start HTTP server
+	go func() {
+		fmt.Println("HTTP server started on :8080")
+		if err := http.ListenAndServe(":8080", r); err != nil {
+			log.Fatalf("Failed to start HTTP server: %v", err)
+		}
+	}()
+
+	// --- Existing Azure/Client logic below ---
 	client, err := azure.NewAzureClient(cfg.Azure.StorageAccount, cfg.Azure.EmailEndpoint, cfg.Azure.EmailAccessKey)
 	if err != nil {
 		log.Fatalf("Failed to create AzureClient: %v", err)
@@ -45,8 +99,8 @@ func main() {
 
 	// Example: Send an email
 	emailReq := azure.SendEmailRequest{
-		Sender:    "sender@yourdomain.com",
-		Recipient: "recipient@other.com",
+		Sender:    "DoNotReply@9cb54951-6182-4a23-8dee-328302efdcf2.azurecomm.net",
+		Recipient: "noonthitisan@gmail.com",
 		Subject:   "Test Subject",
 		PlainText: "Hello from AzureClient Email!",
 		HTML:      "<b>Hello from AzureClient Email!</b>",

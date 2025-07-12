@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+
+	"github.com/google/uuid"
 )
 
 // ISendEmailClient defines the interface for sending emails
@@ -89,6 +91,7 @@ func (c *SendEmailClient) SendEmail(ctx context.Context, req SendEmailRequest) e
 	}
 	reqHttp.Header.Set("Content-Type", "application/json")
 	reqHttp.Header.Set("Authorization", "Bearer "+c.AccessKey)
+	reqHttp.Header.Set("x-ms-client-request-id", uuid.New().String())
 	resp, err := http.DefaultClient.Do(reqHttp)
 	if err != nil {
 		return err
